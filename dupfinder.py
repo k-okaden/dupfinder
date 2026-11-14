@@ -4,10 +4,11 @@ DupFinder — 重複ファイル検出ツール（写真・動画・RAW+JPG 対�
 
   python3 dupfinder.py [フォルダ ...]
 
-ブラウザで操作画面が開きます。削除はすべて「ゴミ箱へ移動」なので元に戻せます。
-外部ライブラリ不要（Python 3.8+ 標準ライブラリのみ / macOS・Windows 対応）。
+専用ウィンドウ（pywebview がある場合）またはブラウザで操作画面が開きます。
+削除はすべて「ゴミ箱へ移動」なので元に戻せます。macOS・Windows 対応。
+pywebview が無くても Python 3.8+ の標準ライブラリだけで動きます（ブラウザ表示）。
 """
-__version__ = '0.1.0'
+__version__ = '0.2.0'
 
 import argparse
 import hashlib
@@ -406,7 +407,17 @@ def move_to_trash(paths):
     return ok, failed
 
 
+WINDOW = [None]  # 専用ウィンドウ（pywebview）で動いているときのウィンドウ
+
+
 def choose_folder():
+    if WINDOW[0] is not None:
+        import webview
+        kind = getattr(getattr(webview, 'FileDialog', None), 'FOLDER', None)
+        if kind is None:
+            kind = webview.FOLDER_DIALOG
+        r = WINDOW[0].create_file_dialog(kind)
+        return (r[0] if isinstance(r, (list, tuple)) else r) if r else None
     if IS_MAC:
         r = run(['osascript', '-e', 'POSIX path of (choose folder with prompt "検索するフォルダを選択")'],
                 text=True)
@@ -550,7 +561,10 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == '/api/quit':
             self.send(200, {'ok': True})
             CANCEL.set()
-            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            if WINDOW[0] is not None:
+                threading.Thread(target=WINDOW[0].destroy, daemon=True).start()
+            else:
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
         if u.path == '/api/trash':
             ids = {int(i) for i in data.get('ids', []) if 0 <= int(i) < len(FILES)}
@@ -782,6 +796,7 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
 });
 $('#clear').onclick=()=>{sel.clear();render()};
 setInterval(()=>fetch('/api/ping').catch(()=>{}),20000);
+if(APP_WINDOW)$('#quit').style.display='none';  // 専用ウィンドウでは閉じるボタンで終了
 $('#quit').onclick=async()=>{if(!confirm('DupFinder を終了しますか？'))return;try{await api('/api/quit',{})}catch(e){}
   document.body.innerHTML='<div class="empty" style="padding:80px">DupFinder を終了しました。このタブは閉じてかまいません。</div>'};
 $('#trash').onclick=async()=>{
@@ -798,36 +813,78 @@ $('#trash').onclick=async()=>{
 </script></body></html>'''
 
 
+def data_dir():
+    if IS_MAC:
+        d = os.path.expanduser('~/Library/Application Support/DupFinder')
+    elif IS_WIN:
+        d = os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~'), 'DupFinder')
+    else:
+        d = os.path.expanduser('~/.local/share/dupfinder')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def run_window(webview, url):
+    """専用ウィンドウで表示（閉じるまで戻らない）。開けなければ False"""
+    try:
+        WINDOW[0] = webview.create_window(f'DupFinder {__version__}', url, width=1240, height=880,
+                                          min_size=(720, 560))
+        webview.start(private_mode=False, storage_path=data_dir())
+        return True
+    except Exception as e:  # WebView2 が無い Windows など
+        print('専用ウィンドウを開けませんでした。ブラウザで開きます:', e)
+        WINDOW[0] = None
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description='重複ファイル検出ツール')
     ap.add_argument('folders', nargs='*', help='最初に入力しておくフォルダ')
     ap.add_argument('--port', type=int, default=0)
-    ap.add_argument('--no-browser', action='store_true')
-    a = ap.parse_args()
+    ap.add_argument('--no-browser', action='store_true', help='画面を開かずサーバーだけ起動')
+    ap.add_argument('--browser', action='store_true', help='専用ウィンドウではなくブラウザで開く')
+    a, _ = ap.parse_known_args()  # macOS の .app 起動時の -psn_XXX などは無視
     global HTML
-    # macOS の .app 起動時に渡される -psn_XXX 引数などはフォルダとして扱わない
     folders = [os.path.abspath(f) for f in a.folders if os.path.isdir(f)]
-    HTML = (HTML.replace('INIT_ROOTS', json.dumps(folders))
-                .replace('__VERSION__', __version__))
+    template = (HTML.replace('INIT_ROOTS', json.dumps(folders))
+                    .replace('__VERSION__', __version__))
+
+    webview = None
+    if not a.browser and not a.no_browser:
+        try:
+            import webview
+        except ImportError:
+            webview = None
+
     srv = ThreadingHTTPServer(('127.0.0.1', a.port), Handler)
     url = f'http://127.0.0.1:{srv.server_address[1]}/'
-    print(f'DupFinder {__version__} 起動: {url}\n終了するには Ctrl+C か画面の「終了」ボタン')
-    if not a.no_browser:
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
-    if FROZEN:
-        # アプリ版はウィンドウが無いので、ブラウザを閉じたら自動で終了する
-        def watchdog():
-            while True:
-                time.sleep(15)
-                if time.time() - LAST_PING[0] > IDLE_EXIT and STATE['status'] != 'scanning':
-                    srv.shutdown()
-                    return
-        threading.Thread(target=watchdog, daemon=True).start()
+    server = threading.Thread(target=srv.serve_forever, daemon=True)
+    server.start()
     try:
-        srv.serve_forever()
+        if webview:
+            HTML = template.replace('APP_WINDOW', 'true')
+            if run_window(webview, url):
+                return  # ウィンドウを閉じたら終了
+        HTML = template.replace('APP_WINDOW', 'false')
+
+        print(f'DupFinder {__version__} 起動: {url}\n終了するには Ctrl+C か画面の「終了」ボタン')
+        if not a.no_browser:
+            threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+        if FROZEN:
+            # ブラウザ表示のアプリ版は、ブラウザを閉じて一定時間たったら自動で終了する
+            def watchdog():
+                while True:
+                    time.sleep(15)
+                    if time.time() - LAST_PING[0] > IDLE_EXIT and STATE['status'] != 'scanning':
+                        srv.shutdown()
+                        return
+            threading.Thread(target=watchdog, daemon=True).start()
+        while server.is_alive():
+            server.join(0.5)
     except KeyboardInterrupt:
         pass
     finally:
+        CANCEL.set()
         shutil.rmtree(THUMB_DIR, ignore_errors=True)
 
 

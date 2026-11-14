@@ -1,0 +1,4 @@
+# アプリのビルドに必要なもの（ソースから実行するだけなら不要）
+pyinstaller>=6.10
+pillow
+pywebview>=5.0

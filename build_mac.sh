@@ -3,7 +3,7 @@
 set -e
 cd "$(dirname "$0")"
 python3 -m venv .venv-build
-.venv-build/bin/pip install -q --upgrade pyinstaller pillow
+.venv-build/bin/pip install -q --upgrade -r requirements-build.txt
 .venv-build/bin/pyinstaller --noconfirm dupfinder.spec
 VER=$(sed -n "s/^__version__ = '\(.*\)'/\1/p" dupfinder.py)
 cd dist

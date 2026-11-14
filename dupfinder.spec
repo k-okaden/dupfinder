@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller 設定（macOS: DupFinder.app / Windows: DupFinder.exe）
+#   pip install -r requirements-build.txt
 #   pyinstaller --noconfirm dupfinder.spec
 import re
 import sys
@@ -26,8 +27,7 @@ if sys.platform == 'darwin':
             'CFBundleShortVersionString': VERSION,
             'CFBundleVersion': VERSION,
             'LSMinimumSystemVersion': '11.0',
-            # 画面はブラウザに出すので Dock にアイコンを出さない
-            'LSUIElement': True,
+            'NSHighResolutionCapable': True,
             'NSHumanReadableCopyright': 'MIT License',
         },
     )
